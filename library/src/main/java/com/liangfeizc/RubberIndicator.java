@@ -7,21 +7,22 @@ import android.animation.PropertyValuesHolder;
 import android.animation.ValueAnimator;
 import android.annotation.TargetApi;
 import android.content.Context;
-import android.graphics.Canvas;
+import android.content.res.TypedArray;
 import android.graphics.Path;
 import android.graphics.PathMeasure;
 import android.graphics.PointF;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.util.AttributeSet;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.AccelerateDecelerateInterpolator;
-import android.view.animation.BounceInterpolator;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 
 /**
@@ -30,9 +31,9 @@ import java.util.List;
 public class RubberIndicator extends RelativeLayout {
     private static final String TAG = "RubberIndicator";
 
-    private static final int SMALL_CIRCLE_COLOR = 0xFFDF8D81;
-    private static final int LARGE_CIRCLE_COLOR = 0xFFAF3854;
-    private static final int OUTER_CIRCLE_COLOR = 0xFF533456;
+    private static final int DEFAULT_SMALL_CIRCLE_COLOR = 0xFFDF8D81;
+    private static final int DEFAULT_LARGE_CIRCLE_COLOR = 0xFFAF3854;
+    private static final int DEFAULT_OUTER_CIRCLE_COLOR = 0xFF533456;
 
     private static final int SMALL_CIRCLE_RADIUS = 20;
     private static final int LARGE_CIRCLE_RADIUS = 25;
@@ -76,6 +77,8 @@ public class RubberIndicator extends RelativeLayout {
     private PropertyValuesHolder mPvhScale;
     private PropertyValuesHolder mPvhRotation;
 
+    private LinkedList<Boolean> mPendingAnimations;
+
     /**
      * Movement Path
      */
@@ -94,25 +97,45 @@ public class RubberIndicator extends RelativeLayout {
 
     public RubberIndicator(Context context) {
         super(context);
-        init();
+        init(null, 0);
     }
 
     public RubberIndicator(Context context, AttributeSet attrs) {
         super(context, attrs);
-        init();
+        init(attrs, 0);
     }
 
-    private void init() {
+    public RubberIndicator(Context context, AttributeSet attrs, int defStyleAttr) {
+        super(context, attrs, defStyleAttr);
+        init(attrs, defStyleAttr);
+    }
+
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+    public RubberIndicator(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+        init(attrs, defStyleAttr);
+    }
+
+    private void init(AttributeSet attrs, int defStyle) {
+        /** Get XML attributes */
+        final TypedArray styledAttributes = getContext().obtainStyledAttributes(attrs, R.styleable.RubberIndicator, defStyle, 0);
+        mSmallCircleColor = styledAttributes.getColor(R.styleable.RubberIndicator_smallCircleColor, DEFAULT_SMALL_CIRCLE_COLOR);
+        mLargeCircleColor = styledAttributes.getColor(R.styleable.RubberIndicator_largeCircleColor, DEFAULT_LARGE_CIRCLE_COLOR);
+        mOuterCircleColor = styledAttributes.getColor(R.styleable.RubberIndicator_outerCircleColor, DEFAULT_OUTER_CIRCLE_COLOR);
+        styledAttributes.recycle();
+
         /** Initialize views */
         View rootView = inflate(getContext(), R.layout.rubber_indicator, this);
         mContainer = (LinearLayout) rootView.findViewById(R.id.container);
         mOuterCircle = (CircleView) rootView.findViewById(R.id.outer_circle);
+        
+        // Apply outer color to outerCircle and background shape
+        View containerWrapper = rootView.findViewById(R.id.container_wrapper);
+        mOuterCircle.setColor(mOuterCircleColor);
+        GradientDrawable shape = (GradientDrawable) containerWrapper.getBackground();
+        shape.setColor(mOuterCircleColor);
 
         /** values */
-        mSmallCircleColor = SMALL_CIRCLE_COLOR;
-        mLargeCircleColor = LARGE_CIRCLE_COLOR;
-        mOuterCircleColor = OUTER_CIRCLE_COLOR;
-
         mSmallCircleRadius = dp2px(SMALL_CIRCLE_RADIUS);
         mLargeCircleRadius = dp2px(LARGE_CIRCLE_RADIUS);
         mOuterCircleRadius = dp2px(OUTER_CIRCLE_RADIUS);
@@ -125,6 +148,8 @@ public class RubberIndicator extends RelativeLayout {
 
         mSmallCirclePath = new Path();
 
+        mPendingAnimations = new LinkedList<>();
+
         /** circle view list */
         mCircleViews = new ArrayList<>();
     }
@@ -133,7 +158,10 @@ public class RubberIndicator extends RelativeLayout {
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
         super.onLayout(changed, l, t, r, b);
 
-        mOuterCircle.setCenter(mLargeCircle.getCenter());
+        // Prevent crash if the count as not been set
+        if(mLargeCircle != null){
+            mOuterCircle.setCenter(mLargeCircle.getCenter());
+        }
     }
 
     public void setCount(int count) {
@@ -161,13 +189,21 @@ public class RubberIndicator extends RelativeLayout {
             throw new IllegalArgumentException("focus position must be less than count");
         }
 
-        int i = 0;
-        for (; i < focusPos; i++) {
-            addSmallCircle();
-        }
-        addLargeCircle();
-        for (i = focusPos + 1; i < count; i++) {
-            addSmallCircle();
+        /* Check if the number on indicator has changed since the last setCount to prevent duplicate */
+        if(mCircleViews.size() != count) {
+            mContainer.removeAllViews();
+            mCircleViews.clear();
+
+            int i = 0;
+            for (; i < focusPos; i++) {
+                addSmallCircle();
+            }
+
+            addLargeCircle();
+
+            for (i = focusPos + 1; i < count; i++) {
+                addSmallCircle();
+            }
         }
 
         mFocusPosition = focusPos;
@@ -178,12 +214,18 @@ public class RubberIndicator extends RelativeLayout {
     }
 
     public void moveToLeft() {
-        if (mAnim != null && mAnim.isRunning()) return;
+        if (mAnim != null && mAnim.isRunning()){
+            mPendingAnimations.add(false);
+            return;
+        }
         move(false);
     }
 
     public void moveToRight() {
-        if (mAnim != null && mAnim.isRunning()) return;
+        if (mAnim != null && mAnim.isRunning()){
+            mPendingAnimations.add(true);
+            return;
+        }
         move(true);
     }
 
@@ -320,6 +362,10 @@ public class RubberIndicator extends RelativeLayout {
                     } else {
                         mOnMoveListener.onMovedToLeft();
                     }
+                }
+
+                if(!mPendingAnimations.isEmpty()){
+                    move(mPendingAnimations.removeFirst());
                 }
             }
 
